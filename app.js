@@ -349,8 +349,24 @@ function read() {
     .then(value => {
         const hex = dataViewToHex(value);
         console.log('Received (hex): ' + hex);
+        console.log('Received (raw bytes):', Array.from(new Uint8Array(value.buffer)));
+        
         const decodedAll = decodeAllByFormat(value, format);
         console.log('Received (' + format + ' all): ' + decodedAll);
+        
+        // Also show individual decoded values for debugging
+        if (format !== 'Auto') {
+            const len = value.byteLength;
+            for (let i = 0; i < len; i++) {
+                try {
+                    const byte = value.getUint8(i);
+                    console.log(`Byte ${i}: ${byte} (0x${byte.toString(16).padStart(2, '0')})`);
+                } catch (e) {
+                    console.log(`Byte ${i}: Error reading - ${e.message}`);
+                }
+            }
+        }
+        
         document.querySelector('#value').value = decodedAll;
     })
     .catch(error => {
@@ -455,6 +471,22 @@ function write() {
 function decodeAllByFormat(dataView, format) {
     try {
         const len = dataView.byteLength;
+        
+        // Auto-detect characteristic type based on UUID if format is Auto
+        if (format === 'Auto') {
+            const charUuid = document.querySelector('#characteristic')?.value || '';
+            if (charUuid.toLowerCase().includes('ffe0')) {
+                // FFE0: Boolean (0/1) - single byte boolean
+                return len > 0 ? String(dataView.getUint8(0) > 0 ? 1 : 0) : '0';
+            } else if (charUuid.toLowerCase().includes('ffe1')) {
+                // FFE1: Numeric value - single byte number
+                return len > 0 ? String(dataView.getUint8(0)) : '0';
+            } else if (charUuid.toLowerCase().includes('ffe3')) {
+                // FFE3: Binary pattern - show as hex
+                return dataViewToHex(dataView);
+            }
+        }
+        
         switch (format) {
             case 'Hex':
                 return dataViewToHex(dataView);
@@ -564,9 +596,25 @@ function subscribe() {
         const handler = (event) => {
             const dv = event.target.value;
             const hex = dataViewToHex(dv);
-            const decodedAll = decodeAllByFormat(dv, format);
             console.log('Notify (hex): ' + hex);
+            console.log('Notify (raw bytes):', Array.from(new Uint8Array(dv.buffer)));
+            
+            const decodedAll = decodeAllByFormat(dv, format);
             console.log('Notify (' + format + ' all): ' + decodedAll);
+            
+            // Also show individual decoded values for debugging
+            if (format !== 'Auto') {
+                const len = dv.byteLength;
+                for (let i = 0; i < len; i++) {
+                    try {
+                        const byte = dv.getUint8(i);
+                        console.log(`Notify Byte ${i}: ${byte} (0x${byte.toString(16).padStart(2, '0')})`);
+                    } catch (e) {
+                        console.log(`Notify Byte ${i}: Error reading - ${e.message}`);
+                    }
+                }
+            }
+            
             appendToStream(decodedAll);
         };
         characteristic.addEventListener('characteristicvaluechanged', handler);
