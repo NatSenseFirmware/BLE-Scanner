@@ -45,6 +45,12 @@
                             <a class="mdl-button mdl-button--colored mdl-js-button mdl-js-ripple-effect" onclick="write()" id="write" disabled>
                                 Write
                             </a>
+                            <a class="mdl-button mdl-button--colored mdl-js-button mdl-js-ripple-effect" onclick="subscribe()" id="subscribe" disabled>
+                                Subscribe
+                            </a>
+                            <a class="mdl-button mdl-button--colored mdl-js-button mdl-js-ripple-effect" onclick="unsubscribe()" id="unsubscribe" disabled>
+                                Unsubscribe
+                            </a>
                         </div>
                     </div>
                     <div class="mdl-cell mdl-cell--6-col">
@@ -57,6 +63,8 @@
                             <select id="valueFormat">
                                 <option value="Hex">Hex</option>
                                 <option value="UTF8">UTF-8</option>
+                                <option value="Base64">Base64</option>
+                                <option value="Bits">Bits</option>
                                 <option value="Uint8">Uint8</option>
                                 <option value="Int8">Int8</option>
                                 <option value="Uint16LE">Uint16 LE</option>
@@ -70,6 +78,33 @@
                                 <option value="Float32LE">Float32 LE</option>
                                 <option value="Float32BE">Float32 BE</option>
                             </select>
+                        </div>
+                        <div>
+                            <label for="writeMode">Write Mode</label>
+                            <select id="writeMode">
+                                <option value="Auto">Auto</option>
+                                <option value="WithResponse">With Response</option>
+                                <option value="WithoutResponse">Without Response</option>
+                                <option value="Generic">Generic</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label for="writeTerminator">Write Terminator</label>
+                            <select id="writeTerminator">
+                                <option value="None">None</option>
+                                <option value="LF">LF (\n)</option>
+                                <option value="CR">CR (\r)</option>
+                                <option value="CRLF">CRLF (\r\n)</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label for="autoReadAfterWrite">
+                                <input type="checkbox" id="autoReadAfterWrite" /> Auto read after write
+                            </label>
+                        </div>
+                        <div class="mdl-textfield mdl-js-textfield">
+                            <textarea class="mdl-textfield__input" type="text" rows="10" id="stream"></textarea>
+                            <label class="mdl-textfield__label" for="stream">Stream</label>
                         </div>
                     </div>
                 </div>

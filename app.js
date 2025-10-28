@@ -3,6 +3,8 @@
 let theDevice = null;
 let theServer = null;
 let characteristicMap = new Map();
+let currentNotifyCharacteristic = null;
+let currentNotifyHandler = null;
 
 function isWebBluetoothEnabled() { 
     if (navigator.bluetooth) { 
@@ -72,19 +74,7 @@ function connect() {
 
         return new Promise(resolve => setTimeout(resolve, 500));
     })
-    .then(() => {
-        console.log('Getting Services...');
-        return theServer.getPrimaryServices().catch(async (err) => {
-            console.log('Service list retrieval failed, checking connection...', err);
-            if (theDevice && theDevice.gatt && !theDevice.gatt.connected) {
-                console.log('Reconnecting to GATT server...');
-                theServer = await theDevice.gatt.connect();
-                console.log('Reconnected. Retrying services discovery...');
-                return theServer.getPrimaryServices();
-            }
-            throw err;
-        });
-    })
+    .then(() => getServicesWithRetry(3, 800))
     .then(services => {
         console.log('Getting Characteristics...');
         let queue = Promise.resolve();
@@ -111,6 +101,14 @@ function connect() {
         writeBtn.removeAttribute('disabled');
         readBtn.classList.remove('is-disabled');
         writeBtn.classList.remove('is-disabled');
+        const subBtn = document.querySelector('#subscribe');
+        const unsubBtn = document.querySelector('#unsubscribe');
+        if (subBtn && unsubBtn) {
+            subBtn.removeAttribute('disabled');
+            unsubBtn.removeAttribute('disabled');
+            subBtn.classList.remove('is-disabled');
+            unsubBtn.classList.remove('is-disabled');
+        }
     })
     .catch(error => {
         console.log('Argh! ' + error);
@@ -140,6 +138,16 @@ function dataViewToHex(dataView) {
     const bytes = new Uint8Array(dataView.buffer);
     return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join(' ');
 }
+function dataViewToBase64(dataView) {
+    const bytes = new Uint8Array(dataView.buffer);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    return btoa(binary);
+}
+function dataViewToBits(dataView) {
+    const bytes = new Uint8Array(dataView.buffer);
+    return Array.from(bytes).map(b => b.toString(2).padStart(8, '0')).join(' ');
+}
 
 // Parse a user-entered string into bytes (hex or text)
 function parseInputToBytes(text) {
@@ -168,6 +176,10 @@ function decodeByFormat(dataView, format) {
                 return dataViewToHex(dataView);
             case 'UTF8':
                 return new TextDecoder('utf-8').decode(dataView);
+            case 'Base64':
+                return dataViewToBase64(dataView);
+            case 'Bits':
+                return dataViewToBits(dataView);
             case 'Uint8':
                 return String(dataView.getUint8(0));
             case 'Int8':
@@ -207,6 +219,25 @@ function encodeByFormat(inputText, format) {
     }
     if (format === 'UTF8') {
         return new TextEncoder('utf-8').encode(inputText);
+    }
+    if (format === 'Base64') {
+        const normalized = inputText.trim();
+        try {
+            const bin = atob(normalized);
+            const bytes = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+            return bytes;
+        } catch (e) {
+            throw new Error('Invalid Base64 input');
+        }
+    }
+    if (format === 'Bits') {
+        const groups = inputText.trim().split(/\s+/);
+        const bytes = new Uint8Array(groups.map(g => {
+            if (!/^([01]{8})$/.test(g)) throw new Error('Invalid bits group: ' + g);
+            return parseInt(g, 2);
+        }));
+        return bytes;
     }
     let num = Number(inputText);
     if (!isFinite(num)) {
@@ -318,9 +349,9 @@ function read() {
     .then(value => {
         const hex = dataViewToHex(value);
         console.log('Received (hex): ' + hex);
-        const decoded = decodeByFormat(value, format);
-        console.log('Received (' + format + '): ' + decoded);
-        document.querySelector('#value').value = decoded;
+        const decodedAll = decodeAllByFormat(value, format);
+        console.log('Received (' + format + ' all): ' + decodedAll);
+        document.querySelector('#value').value = decodedAll;
     })
     .catch(error => {
         console.log('Argh! ' + error);
@@ -339,6 +370,11 @@ function write() {
     }
 
     const format = getValueFormat();
+    const writeModeSel = document.querySelector('#writeMode');
+    const writeMode = writeModeSel ? writeModeSel.value : 'Auto';
+    const termSel = document.querySelector('#writeTerminator');
+    const terminator = termSel ? termSel.value : 'None';
+    const autoRead = !!(document.querySelector('#autoReadAfterWrite') && document.querySelector('#autoReadAfterWrite').checked);
     ensureConnected()
     .then(() => theServer.getPrimaryService(serviceUuid))
     .then(service => {
@@ -346,25 +382,253 @@ function write() {
     })
     .then(async characteristic => {
         const input = document.querySelector('#value').value;
-        const bytes = encodeByFormat(input, format);
+        let bytes = encodeByFormat(input, format);
 
-        // Prefer the method that matches characteristic capabilities
-        if (characteristic.properties.write && typeof characteristic.writeValueWithResponse === 'function') {
-            console.log('Writing WITH response:', bytes);
-            return characteristic.writeValueWithResponse(bytes);
+        // Apply terminator if requested
+        if (terminator && terminator !== 'None') {
+            let termBytes;
+            switch (terminator) {
+                case 'LF': termBytes = new Uint8Array([0x0A]); break;
+                case 'CR': termBytes = new Uint8Array([0x0D]); break;
+                case 'CRLF': termBytes = new Uint8Array([0x0D, 0x0A]); break;
+                default: termBytes = new Uint8Array([]);
+            }
+            const merged = new Uint8Array(bytes.length + termBytes.length);
+            merged.set(bytes, 0);
+            merged.set(termBytes, bytes.length);
+            bytes = merged;
         }
-        if (characteristic.properties.writeWithoutResponse && typeof characteristic.writeValueWithoutResponse === 'function') {
-            console.log('Writing WITHOUT response:', bytes);
-            return characteristic.writeValueWithoutResponse(bytes);
+
+        // Decide write method
+        const canWith = characteristic.properties.write && typeof characteristic.writeValueWithResponse === 'function';
+        const canWithout = characteristic.properties.writeWithoutResponse && typeof characteristic.writeValueWithoutResponse === 'function';
+
+        const logSent = () => {
+            console.log('Sent:', dataViewToHex(new DataView(bytes.buffer)));
+            appendToStream('Sent: ' + Array.from(bytes).map(b => b.toString(16).padStart(2,'0')).join(' '));
+        };
+
+        if (writeMode === 'WithResponse' && canWith) {
+            await characteristic.writeValueWithResponse(bytes);
+            logSent();
+            return;
         }
-        // Fallback for older implementations
-        console.log('Writing (generic):', bytes);
-        return characteristic.writeValue(bytes);
+        if (writeMode === 'WithoutResponse' && canWithout) {
+            await characteristic.writeValueWithoutResponse(bytes);
+            logSent();
+            return;
+        }
+        if (writeMode === 'Generic' && typeof characteristic.writeValue === 'function') {
+            await characteristic.writeValue(bytes);
+            logSent();
+            return;
+        }
+        // Auto selection
+        if (canWith) {
+            await characteristic.writeValueWithResponse(bytes);
+            logSent();
+        } else if (canWithout) {
+            await characteristic.writeValueWithoutResponse(bytes);
+            logSent();
+        } else if (typeof characteristic.writeValue === 'function') {
+            await characteristic.writeValue(bytes);
+            logSent();
+        } else {
+            throw new Error('Characteristic does not support any write method');
+        }
     })
     .then(_ => {
         console.log('Sent value successfully');
+        if (autoRead) {
+            try { read(); } catch (e) { console.log('Auto read failed:', e); }
+        }
+    })
+    .catch(error => {
+        console.log('Argh! ' + error);
+        var notification = document.querySelector('.mdl-js-snackbar');
+        if (notification && notification.MaterialSnackbar) {
+            notification.MaterialSnackbar.showSnackbar({ message: 'Write error: ' + error });
+        }
+    });
+}
+
+function decodeAllByFormat(dataView, format) {
+    try {
+        const len = dataView.byteLength;
+        switch (format) {
+            case 'Hex':
+                return dataViewToHex(dataView);
+            case 'UTF8':
+                return new TextDecoder('utf-8').decode(dataView);
+            case 'Base64':
+                return dataViewToBase64(dataView);
+            case 'Bits':
+                return dataViewToBits(dataView);
+            case 'Uint8': {
+                const arr = [];
+                for (let i = 0; i < len; i += 1) arr.push(dataView.getUint8(i));
+                return arr.join(' ');
+            }
+            case 'Int8': {
+                const arr = [];
+                for (let i = 0; i < len; i += 1) arr.push(dataView.getInt8(i));
+                return arr.join(' ');
+            }
+            case 'Uint16LE': {
+                const arr = [];
+                for (let i = 0; i + 1 < len; i += 2) arr.push(dataView.getUint16(i, true));
+                return arr.join(' ');
+            }
+            case 'Uint16BE': {
+                const arr = [];
+                for (let i = 0; i + 1 < len; i += 2) arr.push(dataView.getUint16(i, false));
+                return arr.join(' ');
+            }
+            case 'Int16LE': {
+                const arr = [];
+                for (let i = 0; i + 1 < len; i += 2) arr.push(dataView.getInt16(i, true));
+                return arr.join(' ');
+            }
+            case 'Int16BE': {
+                const arr = [];
+                for (let i = 0; i + 1 < len; i += 2) arr.push(dataView.getInt16(i, false));
+                return arr.join(' ');
+            }
+            case 'Uint32LE': {
+                const arr = [];
+                for (let i = 0; i + 3 < len; i += 4) arr.push(dataView.getUint32(i, true));
+                return arr.join(' ');
+            }
+            case 'Uint32BE': {
+                const arr = [];
+                for (let i = 0; i + 3 < len; i += 4) arr.push(dataView.getUint32(i, false));
+                return arr.join(' ');
+            }
+            case 'Int32LE': {
+                const arr = [];
+                for (let i = 0; i + 3 < len; i += 4) arr.push(dataView.getInt32(i, true));
+                return arr.join(' ');
+            }
+            case 'Int32BE': {
+                const arr = [];
+                for (let i = 0; i + 3 < len; i += 4) arr.push(dataView.getInt32(i, false));
+                return arr.join(' ');
+            }
+            case 'Float32LE': {
+                const arr = [];
+                for (let i = 0; i + 3 < len; i += 4) arr.push(dataView.getFloat32(i, true));
+                return arr.join(' ');
+            }
+            case 'Float32BE': {
+                const arr = [];
+                for (let i = 0; i + 3 < len; i += 4) arr.push(dataView.getFloat32(i, false));
+                return arr.join(' ');
+            }
+            default:
+                return dataViewToHex(dataView);
+        }
+    } catch (e) {
+        console.log('Decode-all error for format', format, e);
+        return dataViewToHex(dataView);
+    }
+}
+
+function appendToStream(text) {
+    const ta = document.querySelector('#stream');
+    if (!ta) return;
+    const ts = new Date().toLocaleTimeString();
+    ta.value += `[${ts}] ${text}\n`;
+    ta.scrollTop = ta.scrollHeight;
+}
+
+function subscribe() {
+    let serviceUuid = document.querySelector('#service').value;
+    if (serviceUuid.startsWith('0x')) {
+        serviceUuid = parseInt(serviceUuid);
+    }
+
+    let characteristicUuid = document.querySelector('#characteristic').value;
+    if (characteristicUuid.startsWith('0x')) {
+        characteristicUuid = parseInt(characteristicUuid);
+    }
+
+    const format = getValueFormat();
+    ensureConnected()
+    .then(() => theServer.getPrimaryService(serviceUuid))
+    .then(service => service.getCharacteristic(characteristicUuid))
+    .then(async characteristic => {
+        if (!characteristic.properties.notify) {
+            console.log('Characteristic does not support NOTIFY.');
+            return;
+        }
+        const handler = (event) => {
+            const dv = event.target.value;
+            const hex = dataViewToHex(dv);
+            const decodedAll = decodeAllByFormat(dv, format);
+            console.log('Notify (hex): ' + hex);
+            console.log('Notify (' + format + ' all): ' + decodedAll);
+            appendToStream(decodedAll);
+        };
+        characteristic.addEventListener('characteristicvaluechanged', handler);
+        await characteristic.startNotifications();
+        currentNotifyCharacteristic = characteristic;
+        currentNotifyHandler = handler;
+        console.log('Subscribed to notifications');
     })
     .catch(error => {
         console.log('Argh! ' + error);
     });
+}
+
+function unsubscribe() {
+    if (!currentNotifyCharacteristic) return;
+    currentNotifyCharacteristic.removeEventListener('characteristicvaluechanged', currentNotifyHandler);
+    currentNotifyCharacteristic.stopNotifications()
+    .then(() => {
+        console.log('Unsubscribed from notifications');
+        currentNotifyCharacteristic = null;
+        currentNotifyHandler = null;
+    })
+    .catch(error => {
+        console.log('Argh! ' + error);
+    });
+}
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function getRequestedServiceUuids() {
+    const input = document.querySelector('#optionalServices').value;
+    return input.split(/, ?/g)
+        .filter(s => s.length > 0)
+        .map(s => s.startsWith('0x') ? parseInt(s) : s);
+}
+
+function getServicesWithRetry(maxAttempts = 3, delayMs = 800) {
+    let attempt = 1;
+    const doAttempt = () => {
+        console.log(`Getting Services (attempt ${attempt}/${maxAttempts})...`);
+        return ensureConnected(600)
+            .then(() => {
+                if (typeof theServer.getPrimaryServices === 'function') {
+                    return theServer.getPrimaryServices();
+                }
+                const uuids = getRequestedServiceUuids();
+                return Promise.all(uuids.map(u => theServer.getPrimaryService(u)));
+            })
+            .catch(async (err) => {
+                console.log('Service list retrieval failed, checking connection...', err);
+                if (theDevice && theDevice.gatt && !theDevice.gatt.connected) {
+                    console.log('Reconnecting to GATT server...');
+                    theServer = await theDevice.gatt.connect();
+                }
+                if (attempt < maxAttempts) {
+                    attempt += 1;
+                    await sleep(delayMs);
+                    return doAttempt();
+                }
+                throw err;
+            });
+    };
+    return doAttempt();
 }
