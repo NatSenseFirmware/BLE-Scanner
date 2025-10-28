@@ -23,10 +23,19 @@
                           <input class="mdl-textfield__input" type="text" id="service" value="0000ffe0-0000-1000-8000-00805f9b34fb">
                           <label class="mdl-textfield__label" for="sample1">Service</label>
                         </div>
-                  
+
                         <div class="mdl-textfield mdl-js-textfield">
                             <input class="mdl-textfield__input" type="text" id="characteristic" value="0000ffe1-0000-1000-8000-00805f9b34fb">
                             <label class="mdl-textfield__label" for="sample2">Characteristic</label>
+                        </div>
+
+                        <div>
+                            <label for="serviceSelect">Service (discovered)</label>
+                            <select id="serviceSelect"></select>
+                        </div>
+                        <div>
+                            <label for="characteristicSelect">Characteristic (discovered)</label>
+                            <select id="characteristicSelect"></select>
                         </div>
                   
                         <div class="mdl-card__actions mdl-card--border">
@@ -42,6 +51,25 @@
                         <div class="mdl-textfield mdl-js-textfield">
                             <textarea class="mdl-textfield__input" type="text" rows= "5" id="value" ></textarea>
                             <label class="mdl-textfield__label" for="value">Value</label>
+                        </div>
+                        <div>
+                            <label for="valueFormat">Value Format</label>
+                            <select id="valueFormat">
+                                <option value="Hex">Hex</option>
+                                <option value="UTF8">UTF-8</option>
+                                <option value="Uint8">Uint8</option>
+                                <option value="Int8">Int8</option>
+                                <option value="Uint16LE">Uint16 LE</option>
+                                <option value="Uint16BE">Uint16 BE</option>
+                                <option value="Int16LE">Int16 LE</option>
+                                <option value="Int16BE">Int16 BE</option>
+                                <option value="Uint32LE">Uint32 LE</option>
+                                <option value="Uint32BE">Uint32 BE</option>
+                                <option value="Int32LE">Int32 LE</option>
+                                <option value="Int32BE">Int32 BE</option>
+                                <option value="Float32LE">Float32 LE</option>
+                                <option value="Float32BE">Float32 BE</option>
+                            </select>
                         </div>
                     </div>
                 </div>
