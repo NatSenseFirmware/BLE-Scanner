@@ -18,7 +18,31 @@
         <div class="app-layout mdl-layout mdl-js-layout">
             <main class="mdl-layout__content">
                 <div class="mdl-grid">
-                    
+                    <div class="mdl-cell mdl-cell--6-col">
+                        <div class="mdl-textfield mdl-js-textfield">
+                          <input class="mdl-textfield__input" type="text" id="service" value="0000ffe0-0000-1000-8000-00805f9b34fb">
+                          <label class="mdl-textfield__label" for="sample1">Service</label>
+                        </div>
+                  
+                        <div class="mdl-textfield mdl-js-textfield">
+                            <input class="mdl-textfield__input" type="text" id="characteristic" value="0000ffe1-0000-1000-8000-00805f9b34fb">
+                            <label class="mdl-textfield__label" for="sample2">Characteristic</label>
+                        </div>
+                  
+                        <button class="mdl-button mdl-js-button mdl-button--raised mdl-js-ripple-effect" onclick="read()">
+                            Read
+                        </button>
+                  
+                        <button class="mdl-button mdl-js-button mdl-button--raised mdl-js-ripple-effect" onclick="write()">
+                            Write
+                        </button>
+                    </div>
+                    <div class="mdl-cell mdl-cell--6-col">
+                        <div class="mdl-textfield mdl-js-textfield">
+                            <textarea class="mdl-textfield__input" type="text" rows= "5" id="value" ></textarea>
+                            <label class="mdl-textfield__label" for="value">Value</label>
+                        </div>
+                    </div>
                 </div>
             </main>
         </div>
@@ -28,7 +52,7 @@
             <div class="mdl-dialog__content">
 
                 <div class="mdl-textfield mdl-js-textfield mdl-textfield--floating-label">
-                    <input class="mdl-textfield__input" type="text" id="optionalServices" placeholder="Bluetooth Services (e.g. generic_access, 0x1234)" required=true value="0000180a-0000-1000-8000-00805f9b34fb"/>
+                    <input class="mdl-textfield__input" type="text" id="optionalServices" placeholder="Bluetooth Services (e.g. generic_access, 0x1234)" required=true value="0000ffe0-0000-1000-8000-00805f9b34fb"/>
                     <label class="mdl-textfield__label" for="optionalServices">Services</label>
                     <span class="mdl-textfield__error">Required</span>
                 </div>

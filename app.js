@@ -1,7 +1,15 @@
 'use strict';
 
+let theDevice = null;
 let theServer = null;
-let deviceInfoServiceUudi = '0000180a-0000-1000-8000-00805f9b34fb';
+
+function isWebBluetoothEnabled() { 
+    if (navigator.bluetooth) { 
+        return true; 
+    } else {
+        return false; 
+    }
+}
 
 function onConnected() {
     document.querySelector('#progressbar').classList.add('hidden');
@@ -17,20 +25,25 @@ function onDisconnected() {
 }
 
 function connect() {
+    let optionalServices = document.querySelector('#optionalServices').value.split(/, ?/g).filter(s => s.length > 0);
+    if (optionalServices.length === 0) {
+        return; // No services specified
+    }
 
-    document.querySelector('.connect-button').setAttribute("disabled","");
-    document.querySelector('#progressbar').classList.remove('hidden');
+    const services = optionalServices.map(s => {
+        if (s.startsWith('0x')) {
+            return parseInt(s);
+        }
+        return s;
+    });
 
-    // Validate services UUID entered by user first.
-    let optionalServices = document.querySelector('#optionalServices').value
-    .split(/, ?/).map(s => s.startsWith('0x') ? parseInt(s) : s)
-    .filter(s => s && BluetoothUUID.getService);
-
-    navigator.bluetooth.requestDevice(
-    {
-        acceptAllDevices: true, optionalServices: optionalServices
+    console.log('Requesting Bluetooth Device...');
+    navigator.bluetooth.requestDevice({
+        filters: [{services: services}],
+        optionalServices: services
     })
     .then(device => {
+        theDevice = device;
         console.log('> Found ' + device.name);
         console.log('Connecting to GATT Server...');
         device.addEventListener('gattserverdisconnected', onDisconnected)
@@ -79,4 +92,62 @@ function getSupportedProperties(characteristic) {
       }
     }
     return '[' + supportedProperties.join(', ') + ']';
+}
+
+function read() {
+    let serviceUuid = document.querySelector('#service').value;
+    if (serviceUuid.startsWith('0x')) {
+        serviceUuid = parseInt(serviceUuid);
+    }
+
+    let characteristicUuid = document.querySelector('#characteristic').value;
+    if (characteristicUuid.startsWith('0x')) {
+        characteristicUuid = parseInt(characteristicUuid);
+    }
+
+    console.log("serviceUuid", serviceUuid, "characteristicUuid", characteristicUuid);
+
+    theServer.getPrimaryService(serviceUuid)
+    .then(service => {
+        return service.getCharacteristic(characteristicUuid);
+    })
+    .then(characteristic => {
+        return characteristic.readValue();
+    })
+    .then(value => {
+        let decoder = new TextDecoder('utf-8');
+        console.log('Received: ' + decoder.decode(value));
+        document.querySelector('#value').value = decoder.decode(value);
+    })
+    .catch(error => {
+        console.log('Argh! ' + error);
+    });
+}
+
+function write() {
+    let serviceUuid = document.querySelector('#service').value;
+    if (serviceUuid.startsWith('0x')) {
+        serviceUuid = parseInt(serviceUuid);
+    }
+
+    let characteristicUuid = document.querySelector('#characteristic').value;
+    if (characteristicUuid.startsWith('0x')) {
+        characteristicUuid = parseInt(characteristicUuid);
+    }
+
+    theServer.getPrimaryService(serviceUuid)
+    .then(service => {
+        return service.getCharacteristic(characteristicUuid);
+    })
+    .then(characteristic => {
+        let encoder = new TextEncoder('utf-8');
+        let value = document.querySelector('#value').value;
+        return characteristic.writeValue(encoder.encode(value));
+    })
+    .then(_ => {
+        console.log('Sent: ' + document.querySelector('#value').value);
+    })
+    .catch(error => {
+        console.log('Argh! ' + error);
+    });
 }
