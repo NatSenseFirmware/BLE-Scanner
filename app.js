@@ -24,6 +24,20 @@ function onDisconnected() {
     // document.querySelector('form').classList.remove('hidden');
 }
 
+// Ensure an active GATT connection before operations
+function ensureConnected(waitMs = 500) {
+    if (theDevice && theDevice.gatt) {
+        if (!theDevice.gatt.connected) {
+            return theDevice.gatt.connect()
+                .then(server => {
+                    theServer = server;
+                    return new Promise(resolve => setTimeout(resolve, waitMs));
+                });
+        }
+    }
+    return Promise.resolve();
+}
+
 function connect() {
     let optionalServices = document.querySelector('#optionalServices').value.split(/, ?/g).filter(s => s.length > 0);
     if (optionalServices.length === 0) {
@@ -39,14 +53,15 @@ function connect() {
 
     console.log('Requesting Bluetooth Device...');
     navigator.bluetooth.requestDevice({
-        filters: [{services: services}],
+        // Use a broader scan like LightBlue; permission will still include the service
+        acceptAllDevices: true,
         optionalServices: services
     })
     .then(device => {
         theDevice = device;
-        console.log('> Found ' + device.name);
+        console.log('> Found ' + (device.name || 'Unknown'));
         console.log('Connecting to GATT Server...');
-        device.addEventListener('gattserverdisconnected', onDisconnected)
+        device.addEventListener('gattserverdisconnected', onDisconnected);
         return device.gatt.connect();
     })
     .then(server => {
@@ -54,22 +69,42 @@ function connect() {
         console.log('Gatt connected');
         onConnected();
 
-        console.log('Getting Services...');
-        return server.getPrimaryServices();
+        return new Promise(resolve => setTimeout(resolve, 500));
     })
-    .then(services => {
-        console.log('Getting Characteristics...');
-        let queue = Promise.resolve();
-        services.forEach(service => {
-          queue = queue.then(_ => service.getCharacteristics().then(characteristics => {
-            console.log('> Service: ' + service.uuid);
-            characteristics.forEach(characteristic => {
-                console.log('>> Characteristic: ' + characteristic.uuid + ' ' +
-                  getSupportedProperties(characteristic));
-            });
-          }));
+    .then(() => {
+        const input = document.querySelector('#optionalServices').value;
+        const firstService = input.split(/, ?/g).filter(s => s.length > 0)[0];
+        let serviceUuid = firstService;
+        if (serviceUuid && serviceUuid.startsWith('0x')) {
+            serviceUuid = parseInt(serviceUuid);
+        }
+
+        console.log('Getting Service...');
+        return theServer.getPrimaryService(serviceUuid).catch(async (err) => {
+            console.log('Service retrieval failed, checking connection...', err);
+            if (theDevice && theDevice.gatt && !theDevice.gatt.connected) {
+                console.log('Reconnecting to GATT server...');
+                theServer = await theDevice.gatt.connect();
+                console.log('Reconnected. Retrying service discovery...');
+                return theServer.getPrimaryService(serviceUuid);
+            }
+            throw err;
         });
-        return queue;
+    })
+    .then(service => {
+        console.log('Getting Characteristics...');
+        return service.getCharacteristics();
+    })
+    .then(characteristics => {
+        console.log('> Service: ' + characteristics[0].service.uuid);
+        characteristics.forEach(characteristic => {
+            console.log('>> Characteristic: ' + characteristic.uuid + ' ' +
+                getSupportedProperties(characteristic));
+        });
+    })
+    .then(() => {
+        document.querySelector('#read').removeAttribute("disabled");
+        document.querySelector('#write').removeAttribute("disabled");
     })
     .catch(error => {
         console.log('Argh! ' + error);
@@ -107,7 +142,8 @@ function read() {
 
     console.log("serviceUuid", serviceUuid, "characteristicUuid", characteristicUuid);
 
-    theServer.getPrimaryService(serviceUuid)
+    ensureConnected()
+    .then(() => theServer.getPrimaryService(serviceUuid))
     .then(service => {
         return service.getCharacteristic(characteristicUuid);
     })
@@ -135,7 +171,8 @@ function write() {
         characteristicUuid = parseInt(characteristicUuid);
     }
 
-    theServer.getPrimaryService(serviceUuid)
+    ensureConnected()
+    .then(() => theServer.getPrimaryService(serviceUuid))
     .then(service => {
         return service.getCharacteristic(characteristicUuid);
     })
