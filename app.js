@@ -6,6 +6,13 @@ let characteristicMap = new Map();
 let currentNotifyCharacteristic = null;
 let currentNotifyHandler = null;
 
+// Periodic reading and data collection variables
+let periodicReadInterval = null;
+let collectedData = [];
+let dataChart = null;
+let isPeriodicReading = false;
+let schedulerCallCount = 0; // Counter for scheduler calls
+
 function isWebBluetoothEnabled() { 
     if (navigator.bluetooth) { 
         return true; 
@@ -109,6 +116,8 @@ function connect() {
             subBtn.classList.remove('is-disabled');
             unsubBtn.classList.remove('is-disabled');
         }
+        // Auto-select FFE3 and start collection if available
+        try { autoSelectFFE3AndStart(); } catch (_) {}
     })
     .catch(error => {
         console.log('Argh! ' + error);
@@ -296,6 +305,8 @@ function populateServiceDropdown(services) {
         const selected = e.target.value;
         document.querySelector('#service').value = selected;
         updateCharacteristicDropdown(selected);
+        // Auto-start or restart when service changes
+        autoStartPeriodicRead();
     };
 }
 
@@ -314,10 +325,14 @@ function updateCharacteristicDropdown(serviceUuid) {
 
     if (chars.length > 0) {
         document.querySelector('#characteristic').value = chars[0].uuid;
+        // Auto-start with the first characteristic
+        autoStartPeriodicRead();
     }
 
     charSelect.onchange = (e) => {
         document.querySelector('#characteristic').value = e.target.value;
+        // Auto-start or restart when characteristic changes
+        autoStartPeriodicRead();
     };
 }
 
@@ -331,8 +346,6 @@ function read() {
     if (characteristicUuid.startsWith('0x')) {
         characteristicUuid = parseInt(characteristicUuid);
     }
-
-    console.log("serviceUuid", serviceUuid, "characteristicUuid", characteristicUuid);
 
     const format = getValueFormat();
     ensureConnected()
@@ -680,3 +693,411 @@ function getServicesWithRetry(maxAttempts = 3, delayMs = 800) {
     };
     return doAttempt();
 }
+
+// -------- Periodic Reading, Charting, and CSV Export --------
+
+function setButtonEnabled(id, enabled) {
+    // Support both current and legacy IDs to avoid null element issues
+    const idAliases = {
+        startPeriodic: ['startPeriodic', 'startPeriodicRead'],
+        stopPeriodic: ['stopPeriodic', 'stopPeriodicRead'],
+        read: ['read'],
+        write: ['write'],
+        subscribe: ['subscribe'],
+        unsubscribe: ['unsubscribe'],
+    };
+    const targets = idAliases[id] || [id];
+    targets.forEach(tid => {
+        const el = document.getElementById(tid);
+        if (!el) return;
+        if (enabled) {
+            el.removeAttribute('disabled');
+            el.classList.remove('is-disabled');
+        } else {
+            el.setAttribute('disabled', '');
+            el.classList.add('is-disabled');
+        }
+    });
+}
+
+function parseADCData(dataView, serviceUuid, characteristicUuid) {
+    const s = serviceUuid ? String(serviceUuid).toLowerCase() : '';
+    const c = characteristicUuid ? String(characteristicUuid).toLowerCase() : '';
+    const isADC = s.includes('ffe3') || c.includes('ffe3');
+    if (!isADC) return null;
+    const bytes = new Uint8Array(dataView.buffer);
+    if (bytes.length < 8) return null;
+    const channels = [];
+    for (let i = 0; i < 4; i++) {
+        const offset = i * 2;
+        const value = (bytes[offset] << 8) | bytes[offset + 1];
+        channels.push({
+            channel: i + 1,
+            rawValue: value,
+            voltage: (value / 4095.0) * 3.3,
+            percentage: (value / 4095.0) * 100,
+        });
+    }
+    return channels;
+}
+
+function startPeriodicReading() {
+    if (isPeriodicReading) {
+        console.log('Periodic reading already running');
+        return;
+    }
+
+    const intervalSelect = document.querySelector('#readInterval');
+    const intervalMs = parseInt(intervalSelect && intervalSelect.value ? intervalSelect.value : '0', 10);
+    if (!intervalMs || intervalMs < 1000) {
+        console.error('Invalid interval selected');
+        return;
+    }
+
+    // Guard: ensure service and characteristic fields exist
+    const svcEl = document.querySelector('#service');
+    const chEl = document.querySelector('#characteristic');
+    if (!svcEl || !chEl) {
+        console.error('Service/Characteristic inputs not found in DOM');
+        return;
+    }
+
+    isPeriodicReading = true;
+    setButtonEnabled('startPeriodic', false);
+    setButtonEnabled('stopPeriodic', true);
+
+    console.log('Starting periodic reading every', intervalMs, 'ms');
+    console.log('Service:', svcEl.value, 'Characteristic:', chEl.value);
+    
+    // Reset scheduler counter when starting new periodic reading
+    schedulerCallCount = 0;
+    updateSchedulerCounter();
+    
+    performPeriodicRead();
+    periodicReadInterval = setInterval(performPeriodicRead, intervalMs);
+}
+
+function stopPeriodicReading() {
+    if (!isPeriodicReading) return;
+    isPeriodicReading = false;
+    if (periodicReadInterval) {
+        clearInterval(periodicReadInterval);
+        periodicReadInterval = null;
+    }
+    setButtonEnabled('startPeriodic', true);
+    setButtonEnabled('stopPeriodic', false);
+    console.log('Stopped periodic reading');
+}
+
+function autoStartPeriodicRead() {
+    const svcEl = document.querySelector('#service');
+    const chEl = document.querySelector('#characteristic');
+    if (!svcEl || !chEl) return;
+    // Restart if already running to apply new UUID/interval
+    if (isPeriodicReading) {
+        stopPeriodicReading();
+    }
+    startPeriodicReading();
+}
+
+function performPeriodicRead() {
+    if (!isPeriodicReading) return;
+    schedulerCallCount++; // Increment scheduler counter
+    updateSchedulerCounter(); // Update display
+    
+    const svcEl = document.querySelector('#service');
+    const chEl = document.querySelector('#characteristic');
+    if (!svcEl || !chEl) {
+        console.error('Service/Characteristic inputs not found in DOM');
+        return;
+    }
+    let serviceUuid = svcEl.value;
+    let characteristicUuid = chEl.value;
+    // Normalize hex-style short UUID strings to numbers for Web Bluetooth
+    if (serviceUuid && /^0x/i.test(serviceUuid)) serviceUuid = parseInt(serviceUuid);
+    if (characteristicUuid && /^0x/i.test(characteristicUuid)) characteristicUuid = parseInt(characteristicUuid);
+    const format = getValueFormat();
+
+    ensureConnected()
+        .then(() => theServer.getPrimaryService(serviceUuid))
+        .then(service => service.getCharacteristic(characteristicUuid))
+        .then(characteristic => {
+            if (!characteristic.properties.read) {
+                // Fallback: if NOTIFY is supported, subscribe and collect data from notifications
+                if (characteristic.properties.notify) {
+                    subscribeForCollection(characteristic, format, svcEl.value, chEl.value);
+                    return Promise.resolve(null);
+                }
+                throw new Error('Characteristic does not support READ or NOTIFY');
+            }
+            return characteristic.readValue();
+        })
+        .then(value => {
+            if (!value) {
+                // Using NOTIFY fallback; data is collected in the notification handler
+                return;
+            }
+            const timestamp = new Date();
+            const hex = dataViewToHex(value);
+            const decoded = decodeByFormat(value, format);
+            const adcData = parseADCData(value, svcEl.value, chEl.value);
+
+            collectedData.push({
+                timestamp,
+                value: decoded,
+                hex,
+                rawBytes: Array.from(new Uint8Array(value.buffer)),
+                adcData,
+            });
+            updateDataPointCount();
+            try {
+                updateChart();
+            } catch (e) {
+                console.error('Chart update error:', e);
+            }
+        })
+        .catch(err => {
+            console.error('Periodic read error:', err);
+        });
+}
+
+// Subscribe to notifications and collect incoming values into collectedData for charting/CSV
+function subscribeForCollection(characteristic, format, serviceUuidRaw, characteristicUuidRaw) {
+    try {
+        // Avoid duplicate subscriptions
+        if (currentNotifyCharacteristic === characteristic) return;
+        // Tear down previous subscription if different characteristic
+        if (currentNotifyCharacteristic && currentNotifyCharacteristic !== characteristic) {
+            try {
+                if (currentNotifyHandler) {
+                    currentNotifyCharacteristic.removeEventListener('characteristicvaluechanged', currentNotifyHandler);
+                }
+                currentNotifyCharacteristic.stopNotifications().catch(() => {});
+            } catch (_) {}
+            currentNotifyCharacteristic = null;
+            currentNotifyHandler = null;
+        }
+
+        const handler = (event) => {
+            const value = event.target.value;
+            const timestamp = new Date();
+            const hex = dataViewToHex(value);
+            const decoded = decodeByFormat(value, format);
+            const adcData = parseADCData(value, serviceUuidRaw, characteristicUuidRaw);
+            collectedData.push({
+                timestamp,
+                value: decoded,
+                hex,
+                rawBytes: Array.from(new Uint8Array(value.buffer)),
+                adcData,
+            });
+            updateDataPointCount();
+            try { updateChart(); } catch (_) {}
+        };
+
+        characteristic.addEventListener('characteristicvaluechanged', handler);
+        characteristic.startNotifications()
+            .then(() => {
+                currentNotifyCharacteristic = characteristic;
+                currentNotifyHandler = handler;
+                console.log('Subscribed to notifications for auto-collection');
+            })
+            .catch(err => console.error('Notify subscribe error:', err));
+    } catch (e) {
+        console.error('subscribeForCollection error:', e);
+    }
+}
+
+// Auto-select FFE3 service/characteristic from discovered services and start periodic collection
+function autoSelectFFE3AndStart() {
+    try {
+        let targetService = null;
+        let targetCharUuid = null;
+        characteristicMap.forEach((chars, svcUuid) => {
+            const s = String(svcUuid).toLowerCase();
+            if (s.includes('ffe3')) {
+                targetService = svcUuid;
+                const readOrNotify = chars.find(c => (c.properties && (c.properties.read || c.properties.notify)));
+                targetCharUuid = readOrNotify ? readOrNotify.uuid : (chars[0] && chars[0].uuid);
+            }
+        });
+
+        if (!targetService || !targetCharUuid) {
+            const firstService = [...characteristicMap.keys()][0];
+            const firstChars = characteristicMap.get(firstService) || [];
+            const firstChar = firstChars[0] && firstChars[0].uuid;
+            if (!firstService || !firstChar) return;
+            targetService = firstService;
+            targetCharUuid = firstChar;
+        }
+
+        const serviceInput = document.getElementById('service');
+        const characteristicInput = document.getElementById('characteristic');
+        if (serviceInput) serviceInput.value = targetService;
+        if (characteristicInput) characteristicInput.value = targetCharUuid;
+        autoStartPeriodicRead();
+    } catch (e) {
+        console.warn('autoSelectFFE3AndStart failed:', e);
+    }
+}
+
+function updateDataPointCount() {
+    const el = document.getElementById('dataPointsCount');
+    if (el) el.textContent = String(collectedData.length);
+}
+
+function updateSchedulerCounter() {
+    const el = document.getElementById('schedulerCount');
+    if (el) el.textContent = String(schedulerCallCount);
+}
+
+function initChart() {
+    const canvas = document.getElementById('dataChart');
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    if (dataChart) {
+        dataChart.destroy();
+        dataChart = null;
+    }
+    dataChart = new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: [],
+            datasets: [],
+        },
+        options: {
+            responsive: true,
+            animation: false,
+            plugins: {
+                legend: { display: true },
+                tooltip: { mode: 'index', intersect: false },
+            },
+            scales: {
+                x: { title: { display: true, text: 'Time' } },
+                y: { title: { display: true, text: 'Reading' } },
+            },
+        },
+    });
+}
+
+function updateChart() {
+    if (!dataChart) initChart();
+    const canvas = document.getElementById('dataChart');
+    if (!canvas || !dataChart) return;
+
+    const latest = collectedData[collectedData.length - 1];
+    const isADC = latest && latest.adcData && latest.adcData.length === 4;
+    if (isADC) {
+        updateADCChart();
+    } else {
+        updateRegularChart();
+    }
+}
+
+function toTimeLabel(ts) {
+    try {
+        return ts.toLocaleTimeString();
+    } catch (_) {
+        return String(ts);
+    }
+}
+
+function updateRegularChart() {
+    if (!dataChart) return;
+    const labels = collectedData.map(dp => toTimeLabel(dp.timestamp));
+    const values = collectedData.map(dp => {
+        const num = Number(dp.value);
+        return isFinite(num) ? num : null;
+    });
+    if (dataChart.data.datasets.length === 0) {
+        dataChart.data.datasets.push({
+            label: 'Reading',
+            data: [],
+            borderColor: '#1976d2',
+            backgroundColor: 'rgba(25, 118, 210, 0.1)',
+            tension: 0.2,
+        });
+    }
+    dataChart.data.labels = labels;
+    dataChart.data.datasets[0].data = values;
+    dataChart.update();
+}
+
+function updateADCChart() {
+    if (!dataChart) return;
+    const labels = collectedData.map(dp => toTimeLabel(dp.timestamp));
+    const chData = [[], [], [], []];
+    collectedData.forEach(dp => {
+        const adc = dp.adcData;
+        if (adc && adc.length === 4) {
+            for (let i = 0; i < 4; i++) chData[i].push(adc[i].rawValue);
+        } else {
+            for (let i = 0; i < 4; i++) chData[i].push(null);
+        }
+    });
+    const colors = ['#e53935', '#43a047', '#fb8c00', '#8e24aa'];
+    while (dataChart.data.datasets.length < 4) {
+        const idx = dataChart.data.datasets.length;
+        dataChart.data.datasets.push({
+            label: 'ADC CH' + (idx + 1),
+            data: [],
+            borderColor: colors[idx % colors.length],
+            backgroundColor: 'rgba(0,0,0,0.05)',
+            tension: 0.2,
+        });
+    }
+    dataChart.data.labels = labels;
+    for (let i = 0; i < 4; i++) dataChart.data.datasets[i].data = chData[i];
+    dataChart.update();
+}
+
+function exportCSV() {
+    let csv = 'timestamp,value,hex,ADC_CH1,ADC_CH2,ADC_CH3,ADC_CH4\n';
+    collectedData.forEach(dp => {
+        const ts = dp.timestamp.toISOString();
+        const val = String(dp.value).replace(/"/g, '""');
+        const hex = dp.hex;
+        let ch = ['', '', '', ''];
+        if (dp.adcData && dp.adcData.length === 4) {
+            ch = dp.adcData.map(c => String(c.rawValue));
+        }
+        csv += `${ts},"${val}",${hex},${ch[0]},${ch[1]},${ch[2]},${ch[3]}\n`;
+    });
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `ble_data_${new Date().toISOString().replace(/:/g, '-')}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+}
+
+function clearData() {
+    collectedData = [];
+    updateDataPointCount();
+    if (dataChart) {
+        dataChart.data.labels = [];
+        dataChart.data.datasets.forEach(ds => ds.data = []);
+        dataChart.update();
+    }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    // Buttons may not exist; ensure no errors
+    setButtonEnabled('startPeriodic', false);
+    setButtonEnabled('stopPeriodic', false);
+    // Init chart lazily
+    initChart();
+    updateDataPointCount();
+    // Auto-start on manual text input changes
+    const svcText = document.getElementById('service');
+    const chText = document.getElementById('characteristic');
+    if (svcText) svcText.addEventListener('input', autoStartPeriodicRead);
+    if (chText) chText.addEventListener('input', autoStartPeriodicRead);
+    // Restart on interval change
+    const intervalSelect = document.getElementById('readInterval');
+    if (intervalSelect) intervalSelect.addEventListener('change', autoStartPeriodicRead);
+});
