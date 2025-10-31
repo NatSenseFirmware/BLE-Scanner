@@ -50,6 +50,8 @@ function ensureConnected(waitMs = 500) {
                     throw err; // Re-throw to be handled by caller
                 });
         }
+        // Device is already connected
+        return Promise.resolve();
     } else if (theDevice) {
         // Device exists but gatt is null/undefined - need full reconnection
         console.log('GATT server lost, reconnecting to device...');
@@ -64,8 +66,9 @@ function ensureConnected(waitMs = 500) {
                 throw err;
             });
     }
-    // No device available - cannot reconnect
-    return Promise.reject(new Error('No BLE device available for reconnection'));
+    // No device available - cannot reconnect automatically
+    console.warn('No BLE device available for automatic reconnection');
+    return Promise.reject(new Error('BLE device connection completely lost. Please reconnect manually.'));
 }
 
 function connect() {
@@ -906,15 +909,29 @@ function performPeriodicRead() {
                     })
                     .catch(reconnectErr => {
                         console.error('Failed to reconnect:', reconnectErr);
-                        // If reconnection fails completely, stop periodic reading
-                        stopPeriodicReading();
                         
-                        // Show user notification
-                        const notification = document.querySelector('.mdl-js-snackbar');
-                        if (notification) {
-                            notification.MaterialSnackbar.showSnackbar({
-                                message: 'BLE connection lost. Please reconnect manually.'
-                            });
+                        // Check if this is a complete connection loss
+                        if (reconnectErr.message && reconnectErr.message.includes('completely lost')) {
+                            // Stop periodic reading and show user-friendly message
+                            stopPeriodicReading();
+                            
+                            // Show user notification with clear instructions
+                            const notification = document.querySelector('.mdl-js-snackbar');
+                            if (notification) {
+                                notification.MaterialSnackbar.showSnackbar({
+                                    message: 'BLE connection completely lost. Please click Connect to reconnect.'
+                                });
+                            }
+                        } else {
+                            // Other reconnection errors
+                            stopPeriodicReading();
+                            
+                            const notification = document.querySelector('.mdl-js-snackbar');
+                            if (notification) {
+                                notification.MaterialSnackbar.showSnackbar({
+                                    message: 'BLE connection lost. Please reconnect manually.'
+                                });
+                            }
                         }
                     });
             }
