@@ -38,14 +38,34 @@ function onDisconnected() {
 function ensureConnected(waitMs = 500) {
     if (theDevice && theDevice.gatt) {
         if (!theDevice.gatt.connected) {
+            console.log('Device disconnected, attempting to reconnect...');
             return theDevice.gatt.connect()
                 .then(server => {
                     theServer = server;
+                    console.log('Device reconnected successfully');
                     return new Promise(resolve => setTimeout(resolve, waitMs));
+                })
+                .catch(err => {
+                    console.error('Reconnection failed:', err);
+                    throw err; // Re-throw to be handled by caller
                 });
         }
+    } else if (theDevice) {
+        // Device exists but gatt is null/undefined - need full reconnection
+        console.log('GATT server lost, reconnecting to device...');
+        return theDevice.gatt.connect()
+            .then(server => {
+                theServer = server;
+                console.log('GATT server reconnected successfully');
+                return new Promise(resolve => setTimeout(resolve, waitMs));
+            })
+            .catch(err => {
+                console.error('GATT reconnection failed:', err);
+                throw err;
+            });
     }
-    return Promise.resolve();
+    // No device available - cannot reconnect
+    return Promise.reject(new Error('No BLE device available for reconnection'));
 }
 
 function connect() {
@@ -858,6 +878,46 @@ function performPeriodicRead() {
         })
         .catch(err => {
             console.error('Periodic read error:', err);
+            
+            // Check if this is a GATT disconnection error
+            if (err.message && (err.message.includes('GATT Server is disconnected') || 
+                err.message.includes('disconnected') || 
+                err.name === 'NetworkError')) {
+                
+                console.log('GATT disconnection detected, attempting to handle...');
+                
+                // Clear the current interval first
+                if (periodicReadInterval) {
+                    clearInterval(periodicReadInterval);
+                    periodicReadInterval = null;
+                }
+                
+                // Try to reconnect and restart periodic reading
+                ensureConnected()
+                    .then(() => {
+                        console.log('Reconnected successfully, restarting periodic reads');
+                        // Restart the periodic reading with current interval
+                        const intervalSelect = document.querySelector('#readInterval');
+                        const intervalMs = parseInt(intervalSelect && intervalSelect.value ? intervalSelect.value : '0', 10);
+                        if (intervalMs && intervalMs >= 1000) {
+                            performPeriodicRead(); // Immediate read
+                            periodicReadInterval = setInterval(performPeriodicRead, intervalMs);
+                        }
+                    })
+                    .catch(reconnectErr => {
+                        console.error('Failed to reconnect:', reconnectErr);
+                        // If reconnection fails completely, stop periodic reading
+                        stopPeriodicReading();
+                        
+                        // Show user notification
+                        const notification = document.querySelector('.mdl-js-snackbar');
+                        if (notification) {
+                            notification.MaterialSnackbar.showSnackbar({
+                                message: 'BLE connection lost. Please reconnect manually.'
+                            });
+                        }
+                    });
+            }
         });
 }
 
